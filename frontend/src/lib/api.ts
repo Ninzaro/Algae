@@ -2,8 +2,12 @@ import type {
   BacktestResult,
   BasketInfo,
   DashboardSnapshot,
+  GridResultPoint,
+  GridSearchRequest,
+  GridSearchResponse,
   PortfolioBlendRequest,
   PortfolioBlendResponse,
+  StrategyLabInfo,
   WalkForwardResult,
   Bar,
   JournalEntry,
@@ -149,6 +153,13 @@ export const api = {
     }),
   portfolioBlend: (payload: PortfolioBlendRequest) =>
     request<PortfolioBlendResponse>("/api/v1/portfolio/blend", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  gridSearchLab: (strategyId: string) =>
+    request<StrategyLabInfo>(`/api/v1/backtests/lab/${encodeURIComponent(strategyId)}`),
+  gridSearch: (payload: GridSearchRequest) =>
+    request<GridSearchResponse>("/api/v1/backtests/grid-search", {
       method: "POST",
       body: JSON.stringify(payload),
     }),

@@ -15,6 +15,7 @@ from alphaforge.adapters.yfinance_data import (
     make_synthetic_trend,
 )
 from alphaforge.api.deps import bind_runtime
+from alphaforge.core.db import create_engine, init_db
 from alphaforge.api.routers import (
     auth,
     backtest,
@@ -148,13 +149,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await runtime.publish("hello")
             except Exception:
                 log.exception("data.warmup_failed")
-        scheduler = None
+        engine = create_engine(settings)
+        await init_db(engine)
         if settings.app_env != "test" and settings.trading_mode != "backtest":
-            from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-            scheduler = AsyncIOScheduler()
-            scheduler.add_job(runtime.run_cycle, "interval", minutes=5, id="trading_cycle")
-            scheduler.start()
+            await runtime.start_event_driven_loop(interval_seconds=300)
         log.info(
             "app.started",
             mode=settings.trading_mode,
@@ -162,8 +160,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             version=__version__,
         )
         yield
-        if scheduler is not None:
-            scheduler.shutdown(wait=False)
+        await runtime.stop_event_driven_loop()
         if runtime.persistence is not None:
             await runtime.persist()
             await runtime.persistence.close()

@@ -9,6 +9,7 @@ from alphaforge.models.enums import JournalEventType
 from alphaforge.services.backtest.engine import BacktestEngine
 from alphaforge.services.backtest.walkforward import WalkForwardEngine
 from alphaforge.services.data.service import MarketDataService
+from alphaforge.services.events import Event, EventBus
 from alphaforge.services.execution.service import ExecutionService
 from alphaforge.services.execution.sizing import size_from_signal
 from alphaforge.services.journal.service import JournalService
@@ -24,7 +25,7 @@ log = get_logger(__name__)
 
 
 class TradingRuntime:
-    """Composition root: wires journal, risk, portfolio, execution, data, and strategies."""
+    """Composition root: wires journal, risk, portfolio, execution, data, strategies, and event bus."""
 
     def __init__(
         self,
@@ -61,6 +62,172 @@ class TradingRuntime:
         self._subscribers: list[Any] = []
         self.persistence: PersistenceService | None = None
         self.persistence_backend = "memory"
+        self.event_bus = EventBus()
+        self._event_loop_running = False
+        self._data_task: Any = None
+        self._register_event_handlers()
+
+    def _register_event_handlers(self) -> None:
+        """Register each enabled strategy as an event subscriber for its symbols."""
+        for meta in self.registry.list_meta():
+            if not meta.enabled:
+                continue
+            symbols = list(meta.symbols)
+            self.event_bus.subscribe(
+                topics=["bars_updated"],
+                symbols=symbols,
+                handler=self._make_strategy_handler(meta.id),
+                subscriber_id=f"strategy:{meta.id}",
+            )
+
+    def _make_strategy_handler(self, strategy_id: str):
+        """Create a closure that evaluates a single strategy on a bars_updated event."""
+
+        async def handler(event: Event) -> None:
+            if self.risk.kill_switch_active:
+                return
+            strategies = [s for s in self.registry.get_all() if s.id == strategy_id]
+            if not strategies:
+                return
+            strat = strategies[0]
+            symbol = event.data.get("symbol", event.symbol)
+            bars_raw = event.data.get("bars", [])
+            bars: list[Bar] = [Bar(**b) if isinstance(b, dict) else b for b in bars_raw]
+
+            if not bars:
+                return
+
+            prices: dict[str, float] = {}
+            snapshot = self.portfolio.snapshot()
+            all_bars: dict[str, list[Bar]] = {}
+            for sym in strat.symbols:
+                cached = self.data.cached_bars(sym)
+                all_bars[sym] = cached
+                if cached:
+                    prices[sym] = cached[-1].close
+            if symbol in all_bars:
+                bars_list = all_bars[symbol]
+            else:
+                bars_list = bars
+            all_bars[symbol] = bars_list
+            if bars_list:
+                prices[symbol] = bars_list[-1].close
+
+            self.portfolio.mark(prices)
+
+            context = StrategyContext(
+                as_of=datetime.now(UTC),
+                bars=all_bars,
+                positions=snapshot.positions,
+            )
+            signals = strat.generate_signals(context)
+
+            valid: list[Signal] = []
+            for sig in signals:
+                series = all_bars.get(sig.symbol, [])
+                bar_ts = series[-1].timestamp if series else sig.timestamp
+                if not self.hold.allow(sig, bar_ts):
+                    continue
+                valid.append(sig)
+
+            if not valid:
+                return
+
+            for sig in valid:
+                self.journal.append(
+                    JournalEventType.SIGNAL,
+                    sig.model_dump(mode="json"),
+                    correlation_id=sig.id,
+                )
+
+            self.recent_signals = (valid + self.recent_signals)[:100]
+
+            for sig in valid:
+                intent = size_from_signal(
+                    sig,
+                    self.portfolio.snapshot(),
+                    all_bars.get(sig.symbol, []),
+                    target_vol=self.settings.target_volatility,
+                    kelly_fraction=self.settings.kelly_fraction,
+                    max_position_pct=self.settings.max_position_pct,
+                )
+                if intent is None:
+                    continue
+                try:
+                    await self.execution.submit_intent(intent, self.portfolio.snapshot())
+                except Exception as exc:
+                    log.warning(
+                        "runtime.intent_skipped",
+                        symbol=sig.symbol,
+                        reason=str(exc),
+                    )
+
+            await self.persist(
+                bars=[b for rows in all_bars.values() for b in rows],
+                signals=valid,
+            )
+            await self.publish("cycle")
+
+        return handler
+
+    def refresh_event_subscriptions(self) -> None:
+        """Re-register event handlers after strategy enable/disable changes."""
+        subscribed_ids = {
+            sid
+            for sid in self.event_bus._subscriptions
+            if sid.startswith("strategy:")
+        }
+        for sid in subscribed_ids:
+            self.event_bus.unsubscribe(sid)
+        self._register_event_handlers()
+        log.info("runtime.event_subs_refreshed", count=self.event_bus.subscriber_count())
+
+    async def start_event_driven_loop(self, interval_seconds: int = 300) -> None:
+        """Start a background loop that fetches data and fires events per symbol."""
+        if self._event_loop_running:
+            return
+        self._event_loop_running = True
+        import asyncio
+
+        async def _loop() -> None:
+            while self._event_loop_running:
+                try:
+                    metas = [m for m in self.registry.list_meta() if m.enabled]
+                    symbols = sorted({s for m in metas for s in m.symbols})
+                    for symbol in symbols:
+                        try:
+                            rows = await self.data.get_bars(symbol, lookback=120)
+                            if rows:
+                                await self.event_bus.fire(
+                                    Event(
+                                        topic="bars_updated",
+                                        symbol=symbol,
+                                        data={
+                                            "symbol": symbol,
+                                            "bars": [r.model_dump(mode="json") for r in rows],
+                                        },
+                                    )
+                                )
+                        except Exception:
+                            log.warning("runtime.data_fetch_failed", symbol=symbol)
+                    await asyncio.sleep(interval_seconds)
+                except Exception:
+                    log.exception("runtime.event_loop_error")
+                    await asyncio.sleep(10)
+
+        self._data_task = asyncio.create_task(_loop())
+        log.info("runtime.event_loop_started", interval_seconds=interval_seconds)
+
+    async def stop_event_driven_loop(self) -> None:
+        """Stop the background data loop."""
+        self._event_loop_running = False
+        if self._data_task is not None:
+            self._data_task.cancel()
+            try:
+                await self._data_task
+            except Exception:
+                pass
+            self._data_task = None
 
     def subscribe(self, callback: Any) -> None:
         self._subscribers.append(callback)
@@ -73,7 +240,8 @@ class TradingRuntime:
                 log.exception("runtime.broadcast_failed", event_name=event)
 
     async def run_cycle(self) -> list[Signal]:
-        """One paper/live cycle: data → signals → size → risk → execution."""
+        """Legacy synchronous cycle: evaluates all strategies at once.
+        Maintained for manual `Run Cycle` button and backward compatibility."""
         metas = [m for m in self.registry.list_meta() if m.enabled]
         symbols = sorted({s for m in metas for s in m.symbols})
         if not symbols:

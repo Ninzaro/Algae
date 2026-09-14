@@ -274,4 +274,53 @@ class PortfolioBlendResponse(BaseModel):
     correlation_matrix: dict[str, dict[str, float]]
 
 
+class ParamRange(BaseModel):
+    name: str
+    min: float
+    max: float
+    step: float
+    default: float
+
+
+class StrategyParamGrid(BaseModel):
+    strategy_id: str
+    params: list[ParamRange]
+
+
+class GridSearchRequest(BaseModel):
+    strategy_id: str
+    symbols: list[str]
+    start: datetime
+    end: datetime
+    timeframe: Timeframe = Timeframe.D1
+    starting_cash: float = Field(default=100_000.0, gt=0)
+    param_grid: list[dict[str, float]] | None = None
+    max_combinations: int = Field(default=100, ge=1, le=500)
+
+
+class GridResultPoint(BaseModel):
+    params: dict[str, Any]
+    sharpe: float
+    total_return_pct: float
+    max_drawdown_pct: float
+    trades: int
+    win_rate: float
+    profit_factor: float
+
+
+class StrategyLabInfo(BaseModel):
+    id: str
+    name: str
+    description: str
+    param_grid: list[ParamRange]
+
+
+class GridSearchResponse(BaseModel):
+    strategy_id: str
+    combinations_tested: int
+    best_params: dict[str, Any]
+    best_result: GridResultPoint
+    results: list[GridResultPoint]
+
+
 

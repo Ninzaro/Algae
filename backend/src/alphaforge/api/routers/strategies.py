@@ -19,6 +19,7 @@ async def toggle_strategy(
     _user: SubjectDep,
 ) -> StrategyView:
     runtime.registry.set_enabled(strategy_id, body.enabled)
+    runtime.refresh_event_subscriptions()
     await runtime.persist()
     await runtime.publish("strategy")
     meta = next(m for m in runtime.registry.list_meta() if m.id == strategy_id)

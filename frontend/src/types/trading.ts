@@ -283,3 +283,46 @@ export interface PortfolioBlendResponse {
   strategy_profiles: StrategyReturnProfile[];
   correlation_matrix: Record<string, Record<string, number>>;
 }
+
+export interface ParamRange {
+  name: string;
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+}
+
+export interface StrategyLabInfo {
+  id: string;
+  name: string;
+  description: string;
+  param_grid: ParamRange[];
+}
+
+export interface GridResultPoint {
+  params: Record<string, unknown>;
+  sharpe: number;
+  total_return_pct: number;
+  max_drawdown_pct: number;
+  trades: number;
+  win_rate: number;
+  profit_factor: number;
+}
+
+export interface GridSearchRequest {
+  strategy_id: string;
+  symbols: string[];
+  start: string;
+  end: string;
+  timeframe?: string;
+  starting_cash?: number;
+  max_combinations?: number;
+}
+
+export interface GridSearchResponse {
+  strategy_id: string;
+  combinations_tested: number;
+  best_params: Record<string, unknown>;
+  best_result: GridResultPoint;
+  results: GridResultPoint[];
+}
