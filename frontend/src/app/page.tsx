@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { EquityChart } from "@/components/equity-chart";
 import { Kpi } from "@/components/kpi";
 import { LoginForm } from "@/components/login-form";
@@ -8,148 +9,109 @@ import { ScripDetailCard } from "@/components/scrip-detail-card";
 import { Shell } from "@/components/shell";
 import { SymbolSearch } from "@/components/symbol-search";
 import { Watchlist } from "@/components/watchlist";
-import { useDashboardSocket } from "@/hooks/use-dashboard-socket";
-import { api, getAccessToken } from "@/lib/api";
+import { useLiveData } from "@/components/providers";
+import {
+  useDashboard,
+  useStrategies,
+  useToggleStrategy,
+  useRunCycle,
+  useKillSwitch,
+} from "@/hooks/use-queries";
+import { getAccessToken } from "@/lib/api";
 import { cn, formatPct, formatTs, formatUsd } from "@/lib/utils";
-import type { DashboardSnapshot, EquityPoint, ScripInfo, StrategyView } from "@/types/trading";
+import type { ScripInfo } from "@/types/trading";
 
 type LookbackOption = 7 | 30 | 60 | 90 | 180 | 365 | "ALL";
 
 export default function DashboardPage() {
-  const [ready, setReady] = useState(false);
+  const token = typeof window !== "undefined" ? getAccessToken() : null;
   const [authed, setAuthed] = useState(false);
-  const [data, setData] = useState<DashboardSnapshot | null>(null);
-  const [strategies, setStrategies] = useState<StrategyView[]>([]);
+  const [ready, setReady] = useState(false);
   const [lookbackDays, setLookbackDays] = useState<LookbackOption>(90);
-  const [selectedScrip, setSelectedScrip] = useState<ScripInfo | { symbol: string; backend_symbol?: string } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const refresh = useCallback(async () => {
-    const [dash, strats] = await Promise.all([api.dashboard(), api.strategies()]);
-    setData(dash);
-    setStrategies(strats);
-  }, []);
+  const [selectedScrip, setSelectedScrip] = useState<
+    ScripInfo | { symbol: string; backend_symbol?: string } | null
+  >(null);
 
   useEffect(() => {
-    const token = getAccessToken();
     setAuthed(Boolean(token));
     setReady(true);
-    if (!token) {
-      return;
-    }
-    refresh().catch((err: Error) => setError(err.message));
-  }, [refresh]);
+  }, [token]);
 
-  const live = useDashboardSocket(authed, (snapshot) => {
-    setData(snapshot);
-  });
+  const live = useLiveData();
+  const { data: snap } = useDashboard(live.data ?? undefined);
+  const { data: strategies = [] } = useStrategies();
+  const toggleStrategy = useToggleStrategy();
+  const runCycle = useRunCycle();
+  const killSwitch = useKillSwitch();
 
-  async function onKill(active: boolean) {
-    setBusy(true);
-    try {
-      await api.killSwitch(active, true, active ? "dashboard" : "released");
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Kill switch failed");
-    } finally {
-      setBusy(false);
-    }
-  }
+  const data = live.data ?? snap ?? null;
+  const error = toggleStrategy.error?.message ?? runCycle.error?.message ?? killSwitch.error?.message ?? null;
+  const busy = toggleStrategy.isPending || runCycle.isPending || killSwitch.isPending;
 
-  async function onCycle() {
-    setBusy(true);
-    try {
-      await api.runCycle();
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Cycle failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onToggle(id: string, enabled: boolean) {
-    await api.toggleStrategy(id, enabled);
-    await refresh();
-  }
-
-  // Filter equity curve by lookback period
   const filteredEquityCurve = useMemo(() => {
-    if (!data || !data.equity_curve || data.equity_curve.length === 0) return [];
+    if (!data?.equity_curve?.length) return [];
     if (lookbackDays === "ALL") return data.equity_curve;
-
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - lookbackDays);
-
     const filtered = data.equity_curve.filter(
       (p) => new Date(p.timestamp).getTime() >= cutoff.getTime(),
     );
     return filtered.length > 0 ? filtered : data.equity_curve;
   }, [data, lookbackDays]);
 
-  // Calculate period metrics
   const periodStats = useMemo(() => {
     if (!data) return { startEquity: 0, periodPnl: 0, periodPnlPct: 0 };
-    const currentEquity = data.account.equity;
     const curve = filteredEquityCurve;
     const startEquity = curve.length > 0 ? curve[0].equity : data.account.equity;
-    const periodPnl = currentEquity - startEquity;
-    const periodPnlPct = startEquity > 0 ? (periodPnl / startEquity) * 100.0 : 0.0;
+    const periodPnl = data.account.equity - startEquity;
+    const periodPnlPct = startEquity > 0 ? (periodPnl / startEquity) * 100 : 0;
     return { startEquity, periodPnl, periodPnlPct };
   }, [data, filteredEquityCurve]);
 
   if (!ready || !authed) {
-    return (
-      <LoginForm
-        onSignedIn={() => {
-          setAuthed(true);
-          setReady(true);
-          refresh().catch((err: Error) => setError(err.message));
-        }}
-      />
-    );
+    return <LoginForm onSignedIn={() => { setAuthed(true); setReady(true); }} />;
   }
 
   if (!data) {
     return (
       <Shell>
-        <p className="text-mute">{error ?? "Loading book…"}</p>
+        <p className="text-mute">
+          {live.connectionState === "connecting" ? "Connecting to live feed..." : error ?? "Loading..."}
+        </p>
       </Shell>
     );
   }
 
   const pnl = data.account.daily_pnl_pct;
-  const dayPnlUsd = (data.account.daily_start_equity * pnl) / 100.0;
+  const dayPnlUsd = (data.account.daily_start_equity * pnl) / 100;
 
   return (
     <Shell>
-      {/* Top Header & Execution Bar */}
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-medium">AlphaForge Control Plane</h1>
           <p className="text-sm text-mute">
             Mode <span className="font-mono text-warn font-semibold">{data.mode.toUpperCase()}</span>
-            {" · "}
+            {" \u00b7 "}
             <span className="font-mono">{data.persistence ?? "memory"}</span>
-            {data.kill_switch ? " · ⚠️ kill switch armed" : ""}
-            {" · "}
-            <span className={live === "live" ? "text-gain font-semibold" : "text-mute"}>
-              ● {live === "live" ? "live stream" : live === "connecting" ? "connecting" : "offline"}
+            {data.kill_switch ? " \u00b7 KILL SWITCH ARMED" : ""}
+            {" \u00b7 "}
+            <span className={live.connectionState === "live" ? "text-gain font-semibold" : "text-mute"}>
+              {"\u25cf"} {live.connectionState === "live" ? "live" : live.connectionState}
             </span>
           </p>
         </div>
         <div className="flex gap-2">
           <button
             disabled={busy}
-            onClick={onCycle}
+            onClick={() => runCycle.mutate()}
             className="rounded border border-line bg-ink-800 px-3.5 py-2 text-xs font-mono font-medium hover:bg-ink-700 disabled:opacity-50"
           >
-            Run Cycle
+            {runCycle.isPending ? "Running..." : "Run Cycle"}
           </button>
           <button
             disabled={busy}
-            onClick={() => onKill(!data.kill_switch)}
+            onClick={() => killSwitch.mutate(!data.kill_switch)}
             className={cn(
               "rounded px-3.5 py-2 text-xs font-mono font-semibold transition-all",
               data.kill_switch
@@ -162,11 +124,10 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Global Quick Scrip Search Bar */}
       <div className="mb-6 rounded-lg border border-line bg-ink-900 p-3.5 shadow-lg">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <span className="text-sm">🔍</span>
+            <span className="text-sm">{">"}</span>
             <span className="text-xs font-mono font-semibold uppercase tracking-wider text-white">
               Instant Scrip Lookup
             </span>
@@ -180,7 +141,6 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Expandable Scrip Detail Workspace */}
       {selectedScrip && (
         <div className="mb-8">
           <ScripDetailCard scrip={selectedScrip} onClose={() => setSelectedScrip(null)} />
@@ -189,7 +149,6 @@ export default function DashboardPage() {
 
       {error ? <p className="mb-4 text-sm text-loss">{error}</p> : null}
 
-      {/* Portfolio Overview & Lookback Analytics */}
       <section className="mb-8 rounded-lg border border-line bg-ink-900 p-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-line pb-4">
           <div>
@@ -210,7 +169,6 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* Lookback Selector */}
           <div className="flex items-center gap-1.5 rounded-lg border border-line bg-ink-950 p-1 text-xs font-mono">
             <span className="px-2 text-mute">Lookback:</span>
             {([7, 30, 60, 90, 180, 365, "ALL"] as LookbackOption[]).map((lb) => (
@@ -230,7 +188,6 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Primary KPI Grid */}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <Kpi
             label="Day P&L"
@@ -260,7 +217,6 @@ export default function DashboardPage() {
           />
         </div>
 
-        {/* Dynamic Equity Curve */}
         <div className="mt-6">
           <div className="mb-2 flex items-center justify-between text-xs font-mono text-mute">
             <span>Historical Equity Curve</span>
@@ -270,7 +226,6 @@ export default function DashboardPage() {
         </div>
       </section>
 
-      {/* Interactive Watchlist Widget */}
       <div className="mb-8">
         <Watchlist
           initialQuotes={data.quotes ?? []}
@@ -278,9 +233,7 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* Positions & Strategy Controls */}
       <div className="grid gap-6 lg:grid-cols-2">
-        {/* Current Positions */}
         <section className="rounded-lg border border-line bg-ink-900 p-4">
           <h2 className="mb-3 text-sm font-medium text-white">Open Portfolio Positions</h2>
           <table className="w-full text-left text-xs font-mono">
@@ -328,7 +281,6 @@ export default function DashboardPage() {
           </table>
         </section>
 
-        {/* Strategy Control Matrix */}
         <section className="rounded-lg border border-line bg-ink-900 p-4">
           <h2 className="mb-3 text-sm font-medium text-white">Active Quantitative Strategies</h2>
           <ul className="space-y-2.5">
@@ -340,11 +292,11 @@ export default function DashboardPage() {
                 <div>
                   <div className="text-xs font-semibold text-white">{s.name}</div>
                   <div className="text-[11px] text-mute font-mono">
-                    ID: {s.id} · Baskets: {s.symbols.join(", ")}
+                    ID: {s.id} \u00b7 Baskets: {s.symbols.join(", ")}
                   </div>
                 </div>
                 <button
-                  onClick={() => onToggle(s.id, !s.enabled)}
+                  onClick={() => toggleStrategy.mutate({ id: s.id, enabled: !s.enabled })}
                   className={cn(
                     "rounded px-2.5 py-1 font-mono text-xs font-semibold transition-all",
                     s.enabled
@@ -360,12 +312,11 @@ export default function DashboardPage() {
         </section>
       </div>
 
-      {/* Live Signals Stream */}
       <section className="mt-8 rounded-lg border border-line bg-ink-900 p-4">
         <h2 className="mb-3 text-sm font-medium text-white">Recent Real-Time Signals</h2>
         <ul className="space-y-2 font-mono text-xs">
           {data.recent_signals.length === 0 ? (
-            <li className="py-4 text-center text-mute">No signals triggered yet — run a cycle.</li>
+            <li className="py-4 text-center text-mute">No signals triggered yet -- run a cycle.</li>
           ) : (
             data.recent_signals.map((s) => {
               const cleanSym = s.symbol.replace(".NS", "").replace(".BO", "");
