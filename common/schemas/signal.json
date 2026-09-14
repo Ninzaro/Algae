@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alphaforge.local/schemas/signal.json",
+  "title": "Signal",
+  "type": "object",
+  "required": ["id", "strategy_id", "symbol", "side", "strength", "timestamp"],
+  "properties": {
+    "id": { "type": "string" },
+    "strategy_id": { "type": "string" },
+    "symbol": { "type": "string" },
+    "side": { "enum": ["buy", "sell", "flat"] },
+    "strength": { "type": "number", "minimum": -1, "maximum": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "reason": { "type": "string" },
+    "metadata": { "type": "object" }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alphaforge.local/schemas/order_intent.json",
+  "title": "OrderIntent",
+  "type": "object",
+  "required": ["id", "strategy_id", "symbol", "side", "quantity"],
+  "properties": {
+    "id": { "type": "string" },
+    "strategy_id": { "type": "string" },
+    "symbol": { "type": "string" },
+    "side": { "enum": ["buy", "sell"] },
+    "quantity": { "type": "number", "exclusiveMinimum": 0 },
+    "order_type": { "enum": ["market", "limit"] },
+    "limit_price": { "type": ["number", "null"] },
+    "signal_id": { "type": ["string", "null"] },
+    "reason": { "type": "string" }
+  }
+}
